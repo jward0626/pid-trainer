@@ -1,0 +1,1011 @@
+import math
+import random
+import sys
+from collections import deque
+import pygame
+
+
+# -----------------------------
+# Helpers
+# -----------------------------
+def clamp(x, lo, hi):
+    return lo if x < lo else hi if x > hi else x
+
+
+def ease_towards(current, target, dt, tau=0.22):
+    if tau <= 1e-6:
+        return target
+    alpha = 1.0 - math.exp(-dt / tau)
+    return current + (target - current) * alpha
+
+
+def fit_text(font: pygame.font.Font, text: str, max_w: int) -> str:
+    if max_w <= 10:
+        return ""
+    if font.size(text)[0] <= max_w:
+        return text
+    ell = "..."
+    lo, hi = 0, len(text)
+    best = ell
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        cand = text[:mid] + ell
+        if font.size(cand)[0] <= max_w:
+            best = cand
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
+def draw_text(surface, font, text, x, y, color, max_w=None):
+    if max_w is not None:
+        text = fit_text(font, text, max_w)
+    img = font.render(text, True, color)
+    surface.blit(img, (x, y))
+    return img.get_width(), img.get_height()
+
+
+def draw_text_right(surface, font, text, right_x, y, color, max_w=None):
+    if max_w is not None:
+        text = fit_text(font, text, max_w)
+    img = font.render(text, True, color)
+    surface.blit(img, (right_x - img.get_width(), y))
+    return img.get_width(), img.get_height()
+
+
+# -----------------------------
+# Config (UI)
+# -----------------------------
+W, H = 1160, 680
+HUD_W = 470
+PLAY_W = W - HUD_W
+FPS = 60
+
+BLACK = (0, 0, 0)
+WHITE = (245, 245, 245)
+GRAY = (140, 140, 140)
+DGRAY = (60, 60, 60)
+
+
+# -----------------------------
+# Track (easier so improvements are visible)
+# -----------------------------
+TRACK_CENTER_Y = int(H * 0.58)
+TRACK_AMP = 90.0
+TRACK_WAVELEN = 980.0     # bigger = longer distance between curves
+PHASE_SPEED = 50.0        # slower scrolling
+
+
+# -----------------------------
+# Robot / physics
+# -----------------------------
+MAX_SPEED_PX = 130.0
+WHEEL_BASE = 44.0
+ROBOT_LEN = 34.0
+ROBOT_WID = 22.0
+
+LOOKAHEAD = 36.0
+BODY_FRONT_OFFSET = ROBOT_LEN * 0.50
+BODY_REAR_OFFSET = -ROBOT_LEN * 0.50
+
+# Camera dead-zone follow + safety clamp
+DEADZONE_LEFT = PLAY_W * 0.10
+DEADZONE_RIGHT = PLAY_W * 0.90
+CAM_SMOOTH_TAU = 0.15
+CAM_SAFE_MARGIN = 60
+
+# Controller update
+CTRL_HZ = 18.0
+DT_CTRL = 1.0 / CTRL_HZ
+
+# Imperfections
+SENSOR_NOISE_STD = 4.0
+STEERING_BIAS = 0.05
+ACTUATOR_LAG_TAU = 0.18
+
+# Sandbox pull-back (never lose)
+SOFT_PULL_TO_LINE = True
+PULL_THRESHOLD = 210.0
+PULL_STRENGTH = 1.05
+
+# Chart
+CHART_SECONDS = 8.0
+CHART_POINTS = int(CHART_SECONDS * FPS)
+
+# Improvement chart history
+CYCLE_HIST_LEN = 70
+
+# Long play stability
+WORLD_SHIFT_AT = 1_000_000.0
+WORLD_SHIFT_BY = 800_000.0
+
+# PID clamps
+KP_MIN, KP_MAX = 0.0, 5.0
+KI_MIN, KI_MAX = 0.0, 0.2
+KD_MIN, KD_MAX = 0.0, 10.0
+TRIM_MIN, TRIM_MAX = -80.0, 80.0
+
+
+# -----------------------------
+# AUTO (Champion vs Challenger)
+# -----------------------------
+AUTO_ERR_TARGET = 20.0
+HOLD_STABLE_S = 4.5
+
+AUTO_SPEED_SCALE = 0.78
+AUTO_BLEND_TAU = 0.60
+
+NUM_CANDIDATES = 14
+SHADOW_DT = 1.0 / 60.0
+QUICK_HORIZON_S = 1.10
+QUICK_STEPS = int(QUICK_HORIZON_S / SHADOW_DT)
+
+SWAP_MARGIN = 0.96  # challenger must be >=4% better (lower cost) to swap
+
+# Cost weights
+W_E2 = 1.0
+W_SPIN2 = 0.025
+W_SPINR2 = 0.010
+W_U2 = 0.0010
+W_DU2 = 0.0030
+
+# Starting "bad" PID so improvement is obvious
+BAD_START = {"kp": 0.22, "ki": 0.0000, "kd": 0.15, "trim": 18.0}
+
+# Safe anchor
+ANCHOR = {"kp": 0.95, "ki": 0.00055, "kd": 1.35, "trim": 0.0}
+
+# Candidate radii
+RAD_KP = 0.22
+RAD_KI = 0.00025
+RAD_KD = 0.55
+RAD_TR = 7.0
+
+RAD_GROW = 1.15
+RAD_SHRINK = 0.92
+RAD_MAX = (0.85, 0.0035, 2.4, 26.0)
+
+AUTO_METHOD_NAME = "Shadow Simulation Search"
+
+
+# -----------------------------
+# Track functions
+# -----------------------------
+def line_y_at(x_world, phase):
+    return TRACK_CENTER_Y + TRACK_AMP * math.sin((x_world + phase) / TRACK_WAVELEN * 2.0 * math.pi)
+
+
+def line_dydx_at(x_world, phase):
+    k = (2.0 * math.pi) / TRACK_WAVELEN
+    return TRACK_AMP * k * math.cos(k * (x_world + phase))
+
+
+def track_heading_at(x_world, phase):
+    return math.atan2(line_dydx_at(x_world, phase), 1.0)
+
+
+# -----------------------------
+# Drawing utilities
+# -----------------------------
+def draw_panel(surface, rect):
+    pygame.draw.rect(surface, (10, 10, 10), rect, 0)
+    pygame.draw.rect(surface, DGRAY, rect, 1)
+
+
+def draw_line_chart(surface, rect, series_gray, series_white, ymin, ymax, font_small, y_unit=""):
+    x0, y0, w, h = rect
+    draw_panel(surface, rect)
+
+    ymin = float(ymin)
+    ymax = float(ymax)
+    if ymin >= ymax:
+        ymin, ymax = 0.0, 1.0
+
+    def y_to_px(v):
+        v = clamp(v, ymin, ymax)
+        t = (v - ymin) / (ymax - ymin)
+        return int(y0 + (1.0 - t) * (h - 1))
+
+    # bottom baseline
+    pygame.draw.line(surface, DGRAY, (x0 + 1, y0 + h - 2), (x0 + w - 2, y0 + h - 2), 1)
+
+    # center line at y=0 (for error chart readability)
+    if ymin < 0.0 < ymax:
+        y_mid = y_to_px(0.0)
+        pygame.draw.line(surface, DGRAY, (x0 + 1, y_mid), (x0 + w - 2, y_mid), 1)
+
+    draw_text(surface, font_small, f"{ymax:.0f}{y_unit}", x0 + 6, y0 + 4, DGRAY, max_w=w - 12)
+    draw_text(surface, font_small, f"{ymin:.0f}{y_unit}", x0 + 6, y0 + h - 18, DGRAY, max_w=w - 12)
+
+    def draw_series(data, color):
+        if len(data) < 2:
+            return
+        n = len(data)
+        pts = []
+        for i, v in enumerate(data):
+            px = int(x0 + 1 + (i / (n - 1)) * (w - 2))
+            py = y_to_px(v)
+            pts.append((px, py))
+        pygame.draw.lines(surface, color, False, pts, 1)
+
+    draw_series(series_gray, GRAY)
+    draw_series(series_white, WHITE)
+
+
+def draw_error_chart(surface, rect, series_true, series_meas, ymin, ymax, font_small):
+    draw_line_chart(surface, rect, series_true, series_meas, ymin, ymax, font_small, y_unit="px")
+
+
+def draw_robot(screen, sx, sy, heading):
+    c = math.cos(heading)
+    s = math.sin(heading)
+    hx = ROBOT_LEN / 2
+    hy = ROBOT_WID / 2
+    corners = [(-hx, -hy), (-hx, hy), (hx, hy), (hx, -hy)]
+    poly = []
+    for lx, ly in corners:
+        wx = sx + lx * c - ly * s
+        wy = sy + lx * s + ly * c
+        poly.append((wx, wy))
+    pygame.draw.polygon(screen, WHITE, poly, 2)
+    fx = sx + (hx + 6) * c
+    fy = sy + (hx + 6) * s
+    pygame.draw.circle(screen, WHITE, (int(fx), int(fy)), 3)
+
+
+# -----------------------------
+# Geometry / error
+# -----------------------------
+def body_error(xw, yw, heading, phase):
+    c = math.cos(heading)
+    s = math.sin(heading)
+    fx = xw + BODY_FRONT_OFFSET * c
+    fy = yw + BODY_FRONT_OFFSET * s
+    rx = xw + BODY_REAR_OFFSET * c
+    ry = yw + BODY_REAR_OFFSET * s
+    eF = line_y_at(fx, phase) - fy
+    eR = line_y_at(rx, phase) - ry
+    return eF, eR, 0.5 * (eF + eR)
+
+
+def controller_error_front(xw, yw, heading, phase):
+    c = math.cos(heading)
+    s = math.sin(heading)
+    la_xw = xw + LOOKAHEAD * c
+    la_yw = yw + LOOKAHEAD * s
+    y_line = line_y_at(la_xw, phase)
+    return y_line - la_yw, la_xw, la_yw, y_line
+
+
+# -----------------------------
+# Shadow simulation (quick horizon)
+# -----------------------------
+def shadow_quick_cost(state, gains, base_pwm, speed_scale):
+    xw = state["xw"]
+    yw = state["yw"]
+    heading = state["heading"]
+    phase = state["phase"]
+    I_state = state["I_state"]
+    e_prev = state["e_prev"]
+    ctrl_accum = state["ctrl_accum"]
+    pwm_l = state["pwm_l"]
+    pwm_r = state["pwm_r"]
+    u_prev = state["u_prev"]
+    u = state["u"]
+
+    kp, ki, kd, trim = gains["kp"], gains["ki"], gains["kd"], gains["trim"]
+    base_eff = base_pwm * speed_scale
+
+    cost_sum = 0.0
+    for _ in range(QUICK_STEPS):
+        phase += PHASE_SPEED * SHADOW_DT
+
+        ctrl_accum += SHADOW_DT
+        while ctrl_accum >= DT_CTRL:
+            ctrl_accum -= DT_CTRL
+            e_front, _, _, _ = controller_error_front(xw, yw, heading, phase)
+
+            I_state += e_front * DT_CTRL
+            I_state = clamp(I_state, -5000.0, 5000.0)
+
+            D_term = (e_front - e_prev) / DT_CTRL
+            e_prev = e_front
+
+            u_prev = u
+            u = kp * e_front + ki * I_state + kd * D_term
+
+            pwm_l_t = clamp(base_eff - u + trim, 0, 255)
+            pwm_r_t = clamp(base_eff + u - trim, 0, 255)
+
+            pwm_l = ease_towards(pwm_l, pwm_l_t, DT_CTRL, tau=ACTUATOR_LAG_TAU)
+            pwm_r = ease_towards(pwm_r, pwm_r_t, DT_CTRL, tau=ACTUATOR_LAG_TAU)
+
+        v_l = (pwm_l / 255.0) * MAX_SPEED_PX
+        v_r = (pwm_r / 255.0) * MAX_SPEED_PX
+        v_l *= (1.0 + STEERING_BIAS)
+        v_r *= (1.0 - STEERING_BIAS)
+
+        v = 0.5 * (v_l + v_r)
+        omega = (v_r - v_l) / WHEEL_BASE
+
+        heading += omega * SHADOW_DT
+        xw += v * math.cos(heading) * SHADOW_DT
+        yw += v * math.sin(heading) * SHADOW_DT
+        yw = clamp(yw, 12, H - 12)
+
+        if SOFT_PULL_TO_LINE:
+            _, _, e_body = body_error(xw, yw, heading, phase)
+            if abs(e_body) > PULL_THRESHOLD:
+                y_target = line_y_at(xw, phase)
+                yw += (y_target - yw) * clamp(PULL_STRENGTH * SHADOW_DT, 0.0, 1.0)
+
+        eF, eR, _ = body_error(xw, yw, heading, phase)
+        e2 = 0.5 * (eF * eF + eR * eR)
+        spin_r = omega / (abs(v) + 1e-3)
+        du = u - u_prev
+
+        cost_sum += (W_E2 * e2
+                     + W_SPIN2 * (omega * omega)
+                     + W_SPINR2 * (spin_r * spin_r)
+                     + W_U2 * (u * u)
+                     + W_DU2 * (du * du))
+
+    return cost_sum / max(1, QUICK_STEPS)
+
+
+# -----------------------------
+# Shadow simulation (full cycle)
+# -----------------------------
+def shadow_full_cycle_cost(state, gains, base_pwm, speed_scale):
+    xw = state["xw"]
+    yw = state["yw"]
+    heading = state["heading"]
+    phase = state["phase"]
+    I_state = state["I_state"]
+    e_prev = state["e_prev"]
+    ctrl_accum = state["ctrl_accum"]
+    pwm_l = state["pwm_l"]
+    pwm_r = state["pwm_r"]
+    u_prev = state["u_prev"]
+    u = state["u"]
+
+    kp, ki, kd, trim = gains["kp"], gains["ki"], gains["kd"], gains["trim"]
+    base_eff = base_pwm * speed_scale
+
+    s0 = xw + phase
+    cost_sum = 0.0
+    steps = 0
+
+    while (xw + phase) - s0 < TRACK_WAVELEN:
+        phase += PHASE_SPEED * SHADOW_DT
+
+        ctrl_accum += SHADOW_DT
+        while ctrl_accum >= DT_CTRL:
+            ctrl_accum -= DT_CTRL
+            e_front, _, _, _ = controller_error_front(xw, yw, heading, phase)
+
+            I_state += e_front * DT_CTRL
+            I_state = clamp(I_state, -5000.0, 5000.0)
+
+            D_term = (e_front - e_prev) / DT_CTRL
+            e_prev = e_front
+
+            u_prev = u
+            u = kp * e_front + ki * I_state + kd * D_term
+
+            pwm_l_t = clamp(base_eff - u + trim, 0, 255)
+            pwm_r_t = clamp(base_eff + u - trim, 0, 255)
+
+            pwm_l = ease_towards(pwm_l, pwm_l_t, DT_CTRL, tau=ACTUATOR_LAG_TAU)
+            pwm_r = ease_towards(pwm_r, pwm_r_t, DT_CTRL, tau=ACTUATOR_LAG_TAU)
+
+        v_l = (pwm_l / 255.0) * MAX_SPEED_PX
+        v_r = (pwm_r / 255.0) * MAX_SPEED_PX
+        v_l *= (1.0 + STEERING_BIAS)
+        v_r *= (1.0 - STEERING_BIAS)
+
+        v = 0.5 * (v_l + v_r)
+        omega = (v_r - v_l) / WHEEL_BASE
+
+        heading += omega * SHADOW_DT
+        xw += v * math.cos(heading) * SHADOW_DT
+        yw += v * math.sin(heading) * SHADOW_DT
+        yw = clamp(yw, 12, H - 12)
+
+        if SOFT_PULL_TO_LINE:
+            _, _, e_body = body_error(xw, yw, heading, phase)
+            if abs(e_body) > PULL_THRESHOLD:
+                y_target = line_y_at(xw, phase)
+                yw += (y_target - yw) * clamp(PULL_STRENGTH * SHADOW_DT, 0.0, 1.0)
+
+        eF, eR, _ = body_error(xw, yw, heading, phase)
+        e2 = 0.5 * (eF * eF + eR * eR)
+        spin_r = omega / (abs(v) + 1e-3)
+        du = u - u_prev
+
+        cost_sum += (W_E2 * e2
+                     + W_SPIN2 * (omega * omega)
+                     + W_SPINR2 * (spin_r * spin_r)
+                     + W_U2 * (u * u)
+                     + W_DU2 * (du * du))
+
+        steps += 1
+        if steps > 3500:
+            break
+
+    return cost_sum / max(1, steps)
+
+
+# -----------------------------
+# Main
+# -----------------------------
+def main():
+    pygame.init()
+    pygame.display.set_caption("PID  Trainer ")
+    screen = pygame.display.set_mode((W, H))
+    clock = pygame.time.Clock()
+    pygame.key.set_repeat(200, 35)
+
+    font_title = pygame.font.SysFont("consolas", 24)
+    font = pygame.font.SysFont("consolas", 17)
+    font_small = pygame.font.SysFont("consolas", 14)
+
+    paused = False
+    auto_state = "OFF"  # OFF / LEARN / HOLD
+
+    params = ["B", "P", "I", "D", "T"]
+    selected = 0
+
+    base = 120.0
+
+    # Start intentionally bad
+    kp0, ki0, kd0, trim0 = BAD_START["kp"], BAD_START["ki"], BAD_START["kd"], BAD_START["trim"]
+    champion = {"kp": kp0, "ki": ki0, "kd": kd0, "trim": trim0}
+    challenger = ANCHOR.copy()
+    tgt = champion.copy()
+
+    # Controller state
+    I_state = 0.0
+    e_prev = 0.0
+    u = 0.0
+    u_prev = 0.0
+    ctrl_accum = 0.0
+
+    # World state
+    phase = 0.0
+    xw = 140.0
+    yw = line_y_at(xw, phase)
+    heading = track_heading_at(xw, phase)
+
+    # PWM state
+    pwm_l_t = base
+    pwm_r_t = base
+    pwm_l = base
+    pwm_r = base
+
+    # Camera
+    cam_x = 0.0
+
+    # Error chart history
+    hist_body = deque(maxlen=CHART_POINTS)
+    hist_front_meas = deque(maxlen=CHART_POINTS)
+
+    # Running avg abs error (for top display + hold trigger)
+    avg_abs_e = 0.0
+    stable_s = 0.0
+
+    # Cycle tracking (s = x + phase)
+    cycle_s0 = xw + phase
+    cycle_progress = 0.0
+    cycle_err_sum = 0.0
+    cycle_err_count = 0
+
+    # Improvement chart (per cycle)
+    cycle_err_hist = deque(maxlen=CYCLE_HIST_LEN)       # white line
+    best_err_hist = deque(maxlen=CYCLE_HIST_LEN)        # gray line (best so far)
+    swap_hist = deque(maxlen=CYCLE_HIST_LEN)            # bool markers
+    best_cycle_err = float("inf")
+    swap_count = 0
+    cycle_count = 0
+
+    # Shadow predicted costs for last cycle decision
+    pred_champ = None
+    pred_chall = None
+    last_swap = "NO"
+    last_pick = "none"
+
+    # Search radii
+    rad_kp, rad_ki, rad_kd, rad_tr = RAD_KP, RAD_KI, RAD_KD, RAD_TR
+
+    # Display smoothing
+    disp = {"kp": kp0, "ki": ki0, "kd": kd0, "tr": trim0}
+
+    def reset_all():
+        nonlocal paused, auto_state, selected, base
+        nonlocal kp0, ki0, kd0, trim0, champion, challenger, tgt
+        nonlocal I_state, e_prev, u, u_prev, ctrl_accum
+        nonlocal phase, xw, yw, heading
+        nonlocal pwm_l_t, pwm_r_t, pwm_l, pwm_r
+        nonlocal cam_x, hist_body, hist_front_meas
+        nonlocal avg_abs_e, stable_s
+        nonlocal cycle_s0, cycle_progress, cycle_err_sum, cycle_err_count
+        nonlocal cycle_err_hist, best_err_hist, swap_hist, best_cycle_err, swap_count, cycle_count
+        nonlocal pred_champ, pred_chall, last_swap, last_pick
+        nonlocal rad_kp, rad_ki, rad_kd, rad_tr
+
+        paused = False
+        auto_state = "OFF"
+        selected = 0
+        base = 120.0
+
+        kp0, ki0, kd0, trim0 = BAD_START["kp"], BAD_START["ki"], BAD_START["kd"], BAD_START["trim"]
+        champion = {"kp": kp0, "ki": ki0, "kd": kd0, "trim": trim0}
+        challenger = ANCHOR.copy()
+        tgt = champion.copy()
+
+        I_state = 0.0
+        e_prev = 0.0
+        u = 0.0
+        u_prev = 0.0
+        ctrl_accum = 0.0
+
+        phase = 0.0
+        xw = 140.0
+        yw = line_y_at(xw, phase)
+        heading = track_heading_at(xw, phase)
+
+        pwm_l_t = base
+        pwm_r_t = base
+        pwm_l = base
+        pwm_r = base
+
+        cam_x = 0.0
+        hist_body.clear()
+        hist_front_meas.clear()
+
+        avg_abs_e = 0.0
+        stable_s = 0.0
+
+        cycle_s0 = xw + phase
+        cycle_progress = 0.0
+        cycle_err_sum = 0.0
+        cycle_err_count = 0
+
+        cycle_err_hist.clear()
+        best_err_hist.clear()
+        swap_hist.clear()
+        best_cycle_err = float("inf")
+        swap_count = 0
+        cycle_count = 0
+
+        pred_champ = None
+        pred_chall = None
+        last_swap = "NO"
+        last_pick = "none"
+
+        rad_kp, rad_ki, rad_kd, rad_tr = RAD_KP, RAD_KI, RAD_KD, RAD_TR
+
+    def apply_delta_manual(key, dv):
+        nonlocal base, kp0, ki0, kd0, trim0, champion, tgt
+        if key == "B":
+            base = clamp(base + dv, 0, 255)
+        elif key == "P":
+            kp0 = clamp(kp0 + dv, KP_MIN, KP_MAX)
+        elif key == "I":
+            ki0 = clamp(ki0 + dv, KI_MIN, KI_MAX)
+        elif key == "D":
+            kd0 = clamp(kd0 + dv, KD_MIN, KD_MAX)
+        elif key == "T":
+            trim0 = clamp(trim0 + dv, TRIM_MIN, TRIM_MAX)
+        champion = {"kp": kp0, "ki": ki0, "kd": kd0, "trim": trim0}
+        tgt = champion.copy()
+
+    reset_all()
+
+    running = True
+    while running:
+        dt = clock.tick(FPS) / 1000.0
+
+        # -----------------------------
+        # Events
+        # -----------------------------
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    running = False
+
+                if event.key == pygame.K_SPACE:
+                    paused = not paused
+
+                if event.key == pygame.K_r:
+                    reset_all()
+
+                if event.key == pygame.K_a:
+                    if auto_state == "OFF":
+                        auto_state = "LEARN"
+                        stable_s = 0.0
+                        cycle_s0 = xw + phase
+                        cycle_err_sum = 0.0
+                        cycle_err_count = 0
+                        last_swap = "NO"
+                        last_pick = "none"
+                    else:
+                        auto_state = "OFF"
+                        champion = {"kp": kp0, "ki": ki0, "kd": kd0, "trim": trim0}
+                        tgt = champion.copy()
+
+                # manual only when auto OFF
+                if auto_state == "OFF":
+                    if event.key == pygame.K_UP:
+                        selected = (selected - 1) % len(params)
+                    elif event.key == pygame.K_DOWN:
+                        selected = (selected + 1) % len(params)
+                    elif event.key in (pygame.K_LEFT, pygame.K_RIGHT):
+                        key = params[selected]
+                        if key == "B":
+                            step = 2.0
+                        elif key == "P":
+                            step = 0.02
+                        elif key == "I":
+                            step = 0.0001
+                        elif key == "D":
+                            step = 0.05
+                        else:
+                            step = 0.5
+                        apply_delta_manual(key, -step if event.key == pygame.K_LEFT else step)
+
+        # -----------------------------
+        # Blend toward champion when auto on
+        # -----------------------------
+        if auto_state in ("LEARN", "HOLD"):
+            kp0 = ease_towards(kp0, tgt["kp"], dt, tau=AUTO_BLEND_TAU)
+            ki0 = ease_towards(ki0, tgt["ki"], dt, tau=AUTO_BLEND_TAU)
+            kd0 = ease_towards(kd0, tgt["kd"], dt, tau=AUTO_BLEND_TAU)
+            trim0 = ease_towards(trim0, tgt["trim"], dt, tau=AUTO_BLEND_TAU)
+
+        # -----------------------------
+        # Measurements
+        # -----------------------------
+        e_front_true, la_xw, la_yw, y_line = controller_error_front(xw, yw, heading, phase)
+        e_front_meas = e_front_true + random.gauss(0.0, SENSOR_NOISE_STD)
+        _, _, e_body = body_error(xw, yw, heading, phase)
+
+        hist_body.append(e_body)
+        hist_front_meas.append(e_front_meas)
+        avg_abs_e = ease_towards(avg_abs_e, abs(e_body), dt, tau=2.2)
+
+        # accumulate cycle error (real performance)
+        cycle_err_sum += abs(e_body)
+        cycle_err_count += 1
+
+        # -----------------------------
+        # Simulation update
+        # -----------------------------
+        if not paused:
+            phase += PHASE_SPEED * dt
+
+            ctrl_accum += dt
+            while ctrl_accum >= DT_CTRL:
+                ctrl_accum -= DT_CTRL
+
+                I_state += e_front_meas * DT_CTRL
+                I_state = clamp(I_state, -5000.0, 5000.0)
+
+                D_term = (e_front_meas - e_prev) / DT_CTRL
+                e_prev = e_front_meas
+
+                u_prev = u
+                u = kp0 * e_front_meas + ki0 * I_state + kd0 * D_term
+
+                base_eff = base * (AUTO_SPEED_SCALE if auto_state in ("LEARN", "HOLD") else 1.0)
+
+                pwm_l_t = clamp(base_eff - u + trim0, 0, 255)
+                pwm_r_t = clamp(base_eff + u - trim0, 0, 255)
+
+            pwm_l = ease_towards(pwm_l, pwm_l_t, dt, tau=ACTUATOR_LAG_TAU)
+            pwm_r = ease_towards(pwm_r, pwm_r_t, dt, tau=ACTUATOR_LAG_TAU)
+
+            v_l = (pwm_l / 255.0) * MAX_SPEED_PX
+            v_r = (pwm_r / 255.0) * MAX_SPEED_PX
+            v_l *= (1.0 + STEERING_BIAS)
+            v_r *= (1.0 - STEERING_BIAS)
+
+            v = 0.5 * (v_l + v_r)
+            omega = (v_r - v_l) / WHEEL_BASE
+
+            heading += omega * dt
+            xw += v * math.cos(heading) * dt
+            yw += v * math.sin(heading) * dt
+            yw = clamp(yw, 12, H - 12)
+
+            if SOFT_PULL_TO_LINE and abs(e_body) > PULL_THRESHOLD:
+                y_target = line_y_at(xw, phase)
+                yw += (y_target - yw) * clamp(PULL_STRENGTH * dt, 0.0, 1.0)
+
+            if xw > WORLD_SHIFT_AT:
+                xw -= WORLD_SHIFT_BY
+                cam_x -= WORLD_SHIFT_BY
+                phase += WORLD_SHIFT_BY
+                cycle_s0 -= WORLD_SHIFT_BY
+
+        # -----------------------------
+        # Cycle progress and AUTO logic
+        # -----------------------------
+        s = xw + phase
+        cycle_progress = clamp((s - cycle_s0) / TRACK_WAVELEN, 0.0, 1.0)
+
+        # HOLD logic needs real avg error under target for time
+        if auto_state == "LEARN":
+            if avg_abs_e <= AUTO_ERR_TARGET:
+                stable_s += dt
+            else:
+                stable_s = max(0.0, stable_s - 0.35 * dt)
+
+            if stable_s >= HOLD_STABLE_S:
+                auto_state = "HOLD"
+
+        if auto_state == "HOLD":
+            if avg_abs_e > (AUTO_ERR_TARGET + 8.0):
+                auto_state = "LEARN"
+                stable_s = 0.0
+
+        # -----------------------------
+        # Cycle end: log improvement + decide swap (champ vs chall)
+        # -----------------------------
+        if (auto_state in ("LEARN", "HOLD")) and (not paused) and (cycle_progress >= 1.0 - 1e-6):
+            cycle_avg_err = (cycle_err_sum / max(1, cycle_err_count))
+            cycle_count += 1
+
+            if cycle_avg_err < best_cycle_err:
+                best_cycle_err = cycle_avg_err
+
+            cycle_err_hist.append(cycle_avg_err)
+            best_err_hist.append(best_cycle_err)
+
+            snap = {
+                "xw": xw, "yw": yw, "heading": heading, "phase": phase,
+                "I_state": I_state, "e_prev": e_prev, "ctrl_accum": ctrl_accum,
+                "pwm_l": pwm_l, "pwm_r": pwm_r,
+                "u_prev": u_prev, "u": u
+            }
+            snap.pop("_toggle", None)
+
+            # build candidates
+            cands = []
+            cands.append({"kp": kp0, "ki": ki0, "kd": kd0, "trim": trim0, "tag": "cur"})
+            cands.append({"kp": champion["kp"], "ki": champion["ki"], "kd": champion["kd"], "trim": champion["trim"], "tag": "champ"})
+            cands.append({"kp": ANCHOR["kp"], "ki": ANCHOR["ki"], "kd": ANCHOR["kd"], "trim": ANCHOR["trim"], "tag": "anch"})
+
+            for i in range(NUM_CANDIDATES - len(cands)):
+                center = champion if (i % 2 == 0) else {"kp": kp0, "ki": ki0, "kd": kd0, "trim": trim0}
+                kp_c = clamp(center["kp"] + random.uniform(-rad_kp, rad_kp), KP_MIN, KP_MAX)
+                ki_c = clamp(center["ki"] + random.uniform(-rad_ki, rad_ki), KI_MIN, KI_MAX)
+                kd_c = clamp(center["kd"] + random.uniform(-rad_kd, rad_kd), KD_MIN, KD_MAX)
+                tr_c = clamp(center["trim"] + random.uniform(-rad_tr, rad_tr), TRIM_MIN, TRIM_MAX)
+                cands.append({"kp": kp_c, "ki": ki_c, "kd": kd_c, "trim": tr_c, "tag": "rnd"})
+
+            # quick pick best challenger
+            best_q = float("inf")
+            best_c = None
+            for cand in cands:
+                cost = shadow_quick_cost(snap, cand, base, AUTO_SPEED_SCALE)
+                if cost < best_q:
+                    best_q = cost
+                    best_c = cand
+
+            challenger = {"kp": best_c["kp"], "ki": best_c["ki"], "kd": best_c["kd"], "trim": best_c["trim"]}
+            last_pick = best_c["tag"]
+
+            # full-cycle validation
+            pred_champ = shadow_full_cycle_cost(snap, champion, base, AUTO_SPEED_SCALE)
+            pred_chall = shadow_full_cycle_cost(snap, challenger, base, AUTO_SPEED_SCALE)
+
+            do_swap = (pred_chall < pred_champ * SWAP_MARGIN)
+
+            if do_swap:
+                champion = challenger.copy()
+                tgt = champion.copy()
+                last_swap = "YES"
+                swap_count += 1
+                swap_hist.append(True)
+
+                # shrink radius
+                rad_kp = min(rad_kp * RAD_SHRINK, RAD_MAX[0])
+                rad_ki = min(rad_ki * RAD_SHRINK, RAD_MAX[1])
+                rad_kd = min(rad_kd * RAD_SHRINK, RAD_MAX[2])
+                rad_tr = min(rad_tr * RAD_SHRINK, RAD_MAX[3])
+
+                if auto_state == "HOLD":
+                    auto_state = "LEARN"
+                    stable_s = 0.0
+            else:
+                last_swap = "NO"
+                swap_hist.append(False)
+
+                # grow radius
+                rad_kp = min(rad_kp * RAD_GROW, RAD_MAX[0])
+                rad_ki = min(rad_ki * RAD_GROW, RAD_MAX[1])
+                rad_kd = min(rad_kd * RAD_GROW, RAD_MAX[2])
+                rad_tr = min(rad_tr * RAD_GROW, RAD_MAX[3])
+
+            # reset cycle
+            cycle_s0 = xw + phase
+            cycle_err_sum = 0.0
+            cycle_err_count = 0
+
+        while len(swap_hist) < len(cycle_err_hist):
+            swap_hist.append(False)
+
+        # -----------------------------
+        # Camera follow
+        # -----------------------------
+        sx_robot_now = xw - cam_x
+        target_cam_x = cam_x
+        if sx_robot_now < DEADZONE_LEFT:
+            target_cam_x = xw - DEADZONE_LEFT
+        elif sx_robot_now > DEADZONE_RIGHT:
+            target_cam_x = xw - DEADZONE_RIGHT
+
+        cam_x = ease_towards(cam_x, target_cam_x, dt, tau=CAM_SMOOTH_TAU)
+        min_cam = xw - (PLAY_W - CAM_SAFE_MARGIN)
+        max_cam = xw - CAM_SAFE_MARGIN
+        cam_x = clamp(cam_x, min_cam, max_cam)
+        if cam_x < 0:
+            cam_x = 0.0
+
+        # Smooth HUD values
+        disp["kp"] = ease_towards(disp["kp"], kp0, dt, tau=0.18)
+        disp["ki"] = ease_towards(disp["ki"], ki0, dt, tau=0.18)
+        disp["kd"] = ease_towards(disp["kd"], kd0, dt, tau=0.18)
+        disp["tr"] = ease_towards(disp["tr"], trim0, dt, tau=0.18)
+
+        # -----------------------------
+        # Render
+        # -----------------------------
+        screen.fill(BLACK)
+        pygame.draw.rect(screen, DGRAY, (0, 0, PLAY_W, H), 2)
+
+        # Track line
+        pts = []
+        for sx in range(0, PLAY_W + 1, 8):
+            x_world = sx + cam_x
+            pts.append((sx, line_y_at(x_world, phase)))
+        pygame.draw.lines(screen, WHITE, False, pts, 2)
+        offset = 22
+        pygame.draw.lines(screen, DGRAY, False, [(px, py - offset) for (px, py) in pts], 1)
+        pygame.draw.lines(screen, DGRAY, False, [(px, py + offset) for (px, py) in pts], 1)
+
+        # Robot
+        sx_robot = xw - cam_x
+        sy_robot = yw
+        draw_robot(screen, sx_robot, sy_robot, heading)
+
+        # Lookahead marker
+        la_sx = la_xw - cam_x
+        la_sy = la_yw
+        pygame.draw.circle(screen, GRAY, (int(la_sx), int(la_sy)), 3, 1)
+        pygame.draw.line(screen, GRAY, (int(la_sx), int(la_sy)), (int(la_sx), int(y_line)), 1)
+
+        # Body markers (front + rear)
+        cH = math.cos(heading)
+        sH = math.sin(heading)
+        fx = xw + BODY_FRONT_OFFSET * cH
+        fy = yw + BODY_FRONT_OFFSET * sH
+        rx = xw + BODY_REAR_OFFSET * cH
+        ry = yw + BODY_REAR_OFFSET * sH
+        pygame.draw.circle(screen, DGRAY, (int(fx - cam_x), int(fy)), 3, 1)
+        pygame.draw.circle(screen, DGRAY, (int(rx - cam_x), int(ry)), 3, 1)
+
+        # HUD layout
+        hud_x = PLAY_W
+        margin = 16
+        inner_w = HUD_W - 2 * margin
+
+        pygame.draw.rect(screen, (10, 10, 10), (hud_x, 0, HUD_W, H))
+        pygame.draw.line(screen, DGRAY, (hud_x, 0), (hud_x, H), 2)
+
+        # ---- FIXED LAYOUT (no overlap) ----
+        top_h = 112
+        params_h = 170
+        bottom_h = 140
+        gap = 10
+        top_y = 14
+        bottom_margin = 14
+
+        r_top = (hud_x + margin, top_y, inner_w, top_h)
+        r_params = (hud_x + margin, r_top[1] + top_h + gap, inner_w, params_h)
+
+        chart_y = r_params[1] + params_h + gap
+        chart_h = H - (chart_y + gap + bottom_h + bottom_margin)
+        chart_h = max(170, chart_h)
+
+        r_chart = (hud_x + margin, chart_y, inner_w, chart_h)
+        r_bottom = (hud_x + margin, chart_y + chart_h + gap, inner_w, bottom_h)
+
+        # TOP
+        draw_panel(screen, r_top)
+        x0, y0, w0, _ = r_top
+
+        draw_text(screen, font_title, "PID TRAINER", x0 + 10, y0 + 8, WHITE, max_w=w0 - 20)
+        draw_text_right(screen, font_small, "by Jacky Li from HKUST", x0 + w0 - 10, y0 + 12, GRAY, max_w=w0 - 20)
+
+        draw_text(screen, font, f"Pause: {'YES' if paused else 'NO'}", x0 + 10, y0 + 40, GRAY, max_w=w0 - 20)
+        draw_text(screen, font, f"Avg error: {avg_abs_e:6.2f} px", x0 + 10, y0 + 62, GRAY, max_w=w0 - 20)
+        draw_text(screen, font_small, f"AUTO: {auto_state}  |  {AUTO_METHOD_NAME}", x0 + 10, y0 + 86, GRAY, max_w=w0 - 20)
+
+        # PARAMS
+        draw_panel(screen, r_params)
+        x1, y1, w1, _ = r_params
+
+        if auto_state == "OFF":
+            sel_key = params[selected]
+            draw_text(screen, font_small, "Keys: UP DOWN select B P I D T, LEFT RIGHT change", x1 + 10, y1 + 10, GRAY, max_w=w1 - 20)
+            draw_text(screen, font_small, f"Select: {sel_key}  A auto  R reset  SPACE pause", x1 + 10, y1 + 28, GRAY, max_w=w1 - 20)
+        else:
+            draw_text(screen, font_small, f"Cycle progress: {cycle_progress*100:5.1f}%", x1 + 10, y1 + 10, GRAY, max_w=w1 - 20)
+            draw_text(screen, font_small, f"Pick={last_pick} Swap={last_swap} Swaps={swap_count}", x1 + 10, y1 + 28, GRAY, max_w=w1 - 20)
+
+        def fmt_line(key, label, value_str):
+            mark = ">" if (auto_state == "OFF" and params[selected] == key) else " "
+            return f"{mark} {label}: {value_str}"
+
+        draw_text(screen, font, fmt_line("B", "B Base", f"{base:8.2f}"), x1 + 10, y1 + 52, WHITE, max_w=w1 - 20)
+        draw_text(screen, font, fmt_line("P", "P Kp",   f"{disp['kp']:8.3f}"), x1 + 10, y1 + 78, WHITE, max_w=w1 - 20)
+        draw_text(screen, font, fmt_line("I", "I Ki",   f"{disp['ki']:8.5f}"), x1 + 10, y1 + 104, WHITE, max_w=w1 - 20)
+        draw_text(screen, font, fmt_line("D", "D Kd",   f"{disp['kd']:8.3f}"), x1 + 10, y1 + 130, WHITE, max_w=w1 - 20)
+        draw_text(screen, font, fmt_line("T", "T Trim", f"{disp['tr']:8.2f}"), x1 + 10, y1 + 156, WHITE, max_w=w1 - 20)
+
+        # ERROR CHART
+        draw_panel(screen, r_chart)
+        x2, y2, w2, h2 = r_chart
+        draw_text(screen, font, "Error chart", x2 + 10, y2 + 10, GRAY, max_w=w2 - 20)
+
+        chart_rect = (x2 + 10, y2 + 34, w2 - 20, h2 - 44)
+        recent = list(hist_body)
+        amp = max(55.0, (max((abs(v) for v in recent), default=0.0) * 1.25))
+        draw_error_chart(screen, chart_rect, list(hist_body), list(hist_front_meas), -amp, amp, font_small)
+
+        # IMPROVEMENT CHART
+        draw_panel(screen, r_bottom)
+        xb, yb, wb, hb = r_bottom
+        draw_text(screen, font_small, "Improvement chart", xb + 10, yb + 8, GRAY, max_w=wb - 20)
+
+        imp_rect = (xb + 10, yb + 28, wb - 20, hb - 38)
+
+        if len(cycle_err_hist) >= 2:
+            mx = max(cycle_err_hist)
+            ymin = 0.0
+            ymax = max(30.0, mx * 1.15)
+            draw_line_chart(screen, imp_rect, list(best_err_hist), list(cycle_err_hist), ymin, ymax, font_small, y_unit="px")
+
+            # show last & best (inside the chart, not extra explanation lines)
+            last = cycle_err_hist[-1]
+            best = best_err_hist[-1]
+            x0i, y0i, w0i, _ = imp_rect
+            draw_text(screen, font_small, f"last={last:.1f}px  best={best:.1f}px",
+                      x0i + 8, y0i + 6, WHITE, max_w=w0i - 16)
+
+            # swap ticks
+            x0i, y0i, w0i, h0i = imp_rect
+            n = len(cycle_err_hist)
+            for i, did_swap in enumerate(swap_hist):
+                if not did_swap:
+                    continue
+                px = int(x0i + 1 + (i / (n - 1)) * (w0i - 2))
+                pygame.draw.line(screen, DGRAY, (px, y0i + h0i - 2), (px, y0i + h0i - 10), 1)
+        else:
+            draw_panel(screen, imp_rect)
+            draw_text(screen, font_small, "Run AUTO for 2+ cycles.", imp_rect[0] + 10, imp_rect[1] + 10, GRAY, max_w=imp_rect[2] - 20)
+
+        pygame.display.flip()
+
+    pygame.quit()
+    sys.exit()
+
+
+if __name__ == "__main__":
+    main()
