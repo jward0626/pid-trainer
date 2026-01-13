@@ -12,10 +12,12 @@ An interactive sandbox for learning **PID control** by tuning a differential-dri
 
 
 ## Quick Demo
-
+<details>
+  <summary><b>▶ Click to watch </b></summary>
+  
 https://github.com/user-attachments/assets/d381ae2f-4b01-4fbb-9070-9d1a7aeb0f99
 
----
+</details>
 
 ## Features
 
