@@ -1,26 +1,16 @@
 # PID Trainer
 **By Jacky Li from HKUST**
 
-An interactive simulator for learning **PID control** by tuning a differential-drive “robot” to track a moving centerline.  
-Includes realistic imperfections (sensor noise, actuator lag, steering bias), real-time plots, and an automatic tuning method: **Shadow Simulation Search**.
+An interactive sandbox for learning **PID control** by tuning a differential-drive “robot” to track a moving centerline.  
+**Lightweight and simple**, but still includes realistic imperfections (sensor noise, actuator lag, steering bias), real-time plots, and automatic tuning methods/algorithms (more coming soon).
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Pygame](https://img.shields.io/badge/pygame-2.5%2B-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-> **Demo** (replace with your own file)
+> **Demo** 
 >
 > ![Demo](assets/demo.gif)
-
----
-
-# PID Trainer
-
-**PID Trainer** is a research-oriented, interactive sandbox for learning **PID control** and experimenting with **automatic gain search** in a noisy, biased, closed-loop simulation.
-
-It simulates a differential-drive robot tracking a scrolling sinusoidal track under **sensor noise**, **actuator lag**, and **systematic steering bias**. You can tune gains manually and see real-time error plots. It also includes an initial AUTO mode powered by **Shadow Simulation Search** (short-horizon screening + full-cycle validation). More auto PID methods will be added in future updates.
-
-> **Goal:** Education + experimentation — build intuition for PID tuning and prototype/compare auto-tuning algorithms.
 
 ---
 
