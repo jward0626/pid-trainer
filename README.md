@@ -14,29 +14,190 @@ Includes realistic imperfections (sensor noise, actuator lag, steering bias), re
 
 ---
 
-## Why this project exists (educational goal)
-This project is designed like a mini **university control lab**:
-- Discrete-time **PID** (sampling effects, integral windup protection, derivative noise sensitivity)
-- **Lookahead tracking** geometry (error defined ahead of the robot for smoother path following)
-- **Differential-drive kinematics**: turning wheel PWM into forward speed and yaw rate
-- “Reality” in simulation: **sensor noise**, **actuator lag** (first-order response), **steering bias**
-- Auto-tuning idea: evaluate candidate PID gains by running **shadow rollouts** in simulation
+# PID Trainer
+
+**PID Trainer** is a research-oriented, interactive sandbox for learning **PID control** and experimenting with **automatic gain search** in a noisy, biased, closed-loop simulation.
+
+It simulates a differential-drive robot tracking a scrolling sinusoidal track under **sensor noise**, **actuator lag**, and **systematic steering bias**. You can tune gains manually and see real-time error plots. It also includes an initial AUTO mode powered by **Shadow Simulation Search** (short-horizon screening + full-cycle validation). More auto PID methods will be added in future updates.
+
+> **Goal:** Education + experimentation — build intuition for PID tuning and prototype/compare auto-tuning algorithms.
 
 ---
 
 ## Features
-- Real-time **Error chart** (body error + measured lookahead error)
-- **Improvement chart** per cycle (average cycle error + best-so-far)
-- Manual tuning mode: Base PWM / Kp / Ki / Kd / Trim
-- AUTO tuning: **Shadow Simulation Search** (champion vs challenger with validation)
-- Auto HOLD logic when error remains below a target for a period
+
+### Manual tuning (interactive)
+- Live adjustment of **Kp / Ki / Kd** and **Trim**
+- Immediate feedback on:
+  - tracking error (body + lookahead)
+  - oscillation / overshoot
+  - control effort and smoothness
+
+### AUTO mode (v1): Shadow Simulation Search
+- Maintains a **Champion** (best-known gains) and proposes **Challengers**
+- Candidate evaluation pipeline:
+  - **Quick horizon cost** (fast screening)
+  - **Full-cycle cost** (validation across one track wavelength)
+- Swaps only if the challenger is meaningfully better (configurable margin)
+
+### Visualization / instrumentation
+- **Error chart:** true body error + noisy measured lookahead error
+- **Improvement chart:** cycle-average error vs best-so-far + swap markers
+- Smooth HUD readouts + cycle progress in AUTO
 
 ---
 
-## Install & Run
 
-### 1) Create environment (recommended)
-```bash
-python -m venv .venv
-source .venv/bin/activate   # macOS/Linux
-# .venv\Scripts\activate    # Windows
+## Requirements
+- Python **3.9+** (recommended)
+- `pygame`
+
+---
+
+## Installation
+
+    python -m venv .venv
+    source .venv/bin/activate   # macOS/Linux
+    # .venv\Scripts\activate    # Windows
+    pip install pygame
+
+Optional `requirements.txt`:
+    pygame>=2.0
+
+---
+
+## Run
+
+    python pid_trainer.py
+
+(Replace `pid_trainer.py` with your actual filename if different.)
+
+---
+
+## Controls
+
+### Global
+- `ESC` — quit
+- `SPACE` — pause / resume
+- `R` — reset simulation
+- `A` — toggle AUTO (`OFF` ↔ `LEARN`)
+
+### Manual mode (AUTO = OFF)
+- `UP / DOWN` — select parameter **B / P / I / D / T**
+- `LEFT / RIGHT` — adjust selected parameter
+
+**Parameter mapping**
+- `B` = Base PWM (speed baseline)
+- `P` = Kp
+- `I` = Ki
+- `D` = Kd
+- `T` = Trim (left/right bias compensation)
+
+---
+
+## How AUTO Works (Shadow Simulation Search)
+
+AUTO is intentionally designed to be simple and transparent so learners can read and modify the method.
+
+At the end of each “cycle” (≈ one track wavelength), the algorithm:
+1. Samples candidate gain sets around the current best **Champion** (and current gains)
+2. Uses a **short-horizon shadow simulation** to quickly choose a promising **Challenger**
+3. Runs a **full-cycle shadow validation** for both champion and challenger
+4. Swaps only if the challenger is better by a margin:
+
+    pred_chall < pred_champ * SWAP_MARGIN
+
+### Cost function (high level)
+The shadow simulator accumulates weighted penalties for:
+- tracking error (squared)
+- excessive spin (`omega^2`)
+- spin rate normalized by speed
+- control magnitude (`u^2`)
+- control change (`(Δu)^2`)
+
+Weights you can tune in the code:
+- `W_E2, W_SPIN2, W_SPINR2, W_U2, W_DU2`
+
+---
+
+## Suggested Project Structure
+
+    PID-Trainer/
+    ├─ pid_trainer.py
+    ├─ README.md
+    ├─ LICENSE
+    ├─ docs/
+    │  ├─ demo.gif
+    │  ├─ screenshot_hud.png
+    │  └─ screenshot_auto.png
+    └─ requirements.txt
+
+---
+
+## Roadmap
+Planned additions (future updates):
+- Additional **auto PID search/tuning methods**, such as:
+  - random search baselines (for comparison)
+  - grid / Bayesian-style search
+  - gradient-free optimizers (CMA-ES / NES-style)
+  - classical heuristics (e.g., Ziegler–Nichols variants) adapted to this simulation
+- More environments / tracks:
+  - step disturbances, sharper turns, different track shapes
+  - speed schedules and constraints
+- Better reproducibility & logging:
+  - deterministic seeds
+  - export gain history + metrics
+
+---
+
+## Educational Notes
+PID Trainer highlights common real-world issues that affect tuning:
+- noisy measurements (`SENSOR_NOISE_STD`)
+- actuator dynamics (`ACTUATOR_LAG_TAU`)
+- small systematic biases (`STEERING_BIAS`)
+- trade-offs between aggressiveness and smoothness
+
+This project is **not** intended as a physically exact model of a specific robot platform. It is a controllable sandbox that behaves “realistically enough” for learning and algorithm comparisons.
+
+---
+
+## Contributing
+Contributions are welcome:
+- new auto-tuning strategies
+- improved cost design / metrics
+- UI/UX improvements
+- refactoring into modules + tests
+
+Suggested workflow:
+1. Fork the repo
+2. Create a feature branch
+3. Open a PR with:
+   - summary of changes
+   - before/after screenshots or a short GIF for UI changes
+
+---
+
+## Citation
+If you use this project in teaching, demos, or research prototypes, please cite:
+
+    @software{pid_trainer,
+      title        = {PID Trainer},
+      author       = {Jacky Li},
+      year         = {2026},
+      note         = {Interactive PID tuning sandbox},
+    }
+
+---
+
+## License
+Recommended options:
+- **MIT** (simple, permissive)
+- **Apache-2.0** (includes explicit patent grant)
+
+Add a `LICENSE` file accordingly.
+
+---
+
+## Acknowledgements
+- Built with **Pygame**
+- Inspired by classic control education labs and practical tuning workflows
