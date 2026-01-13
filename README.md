@@ -10,9 +10,10 @@ An interactive sandbox for learning **PID control** by tuning a differential-dri
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![Status](https://img.shields.io/badge/Status-Active%20Development-blue)
 
-> **Demo** 
->
-[> [![Demo](assets/demo.mp4)](https://github.com/JackyLi-HKUST/pid-trainer/blob/main/assets/demo.mp4)](https://github.com/JackyLi-HKUST/pid-trainer/blob/main/assets/demo.mp4)
+
+## Quick Demo
+
+https://github.com/JackyLi-HKUST/pid-trainer/blob/main/assets/demo.mp4 
 
 ---
 
