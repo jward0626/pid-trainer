@@ -12,10 +12,12 @@ An interactive sandbox for learning **PID control** by tuning a differential-dri
 
 
 ## Quick Demo
+<details>
+  <summary><b>▶ Click to watch </b></summary>
+  
+https://github.com/user-attachments/assets/d381ae2f-4b01-4fbb-9070-9d1a7aeb0f99
 
-https://github.com/JackyLi-HKUST/pid-trainer/blob/main/assets/demo.mp4 
-
----
+</details>
 
 ## Features
 
@@ -54,14 +56,13 @@ https://github.com/JackyLi-HKUST/pid-trainer/blob/main/assets/demo.mp4
     # .venv\Scripts\activate    # Windows
     pip install -r requirements.txt
 
-Optional `requirements.txt`:
-    pygame>=2.0
+
 
 ---
 
 ## Run
 
-    python -m pid_trainer
+    python main.py
 
 ---
 
